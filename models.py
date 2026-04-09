@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Pydantic models for the email triage (spam detection) environment."""
+"""Pydantic models for the email triage multi-task environment."""
 
 from __future__ import annotations
 
@@ -15,7 +15,16 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class EmailObservation(Observation):
-    """What the agent sees: email content without the ground-truth label."""
+    """What the agent sees: email content without ground-truth labels."""
+
+    task: Literal["spam_detection", "priority_triage", "phishing_risk"] = Field(
+        default="spam_detection",
+        description="Active task identifier",
+    )
+    instructions: str = Field(
+        default="",
+        description="Task-specific instructions for the current step",
+    )
 
     email_id: str = Field(default="", description="Identifier of the current email")
     subject: str = Field(default="", description="Email subject line")
@@ -25,11 +34,25 @@ class EmailObservation(Observation):
 
 
 class EmailAction(Action):
-    """Spam triage action for Task 1: spam_detection."""
+    """Action model across all email-triage tasks."""
 
-    action: Literal["mark_spam", "mark_not_spam"] = Field(
+    task: Literal["spam_detection", "priority_triage", "phishing_risk"] = Field(
+        default="spam_detection",
+        description="Task this action is for",
+    )
+
+    action: Literal[
+        "mark_spam",
+        "mark_not_spam",
+        "mark_high_priority",
+        "mark_normal_priority",
+        "mark_low_priority",
+        "mark_high_risk",
+        "mark_medium_risk",
+        "mark_low_risk",
+    ] = Field(
         ...,
-        description='Classify the email as spam ("mark_spam") or not ("mark_not_spam")',
+        description="Task-specific classification action",
     )
 
 
@@ -42,9 +65,9 @@ class EmailReward(BaseModel):
 
 
 class EmailState(State):
-    """Full server-visible state, including ground-truth label (not in observations)."""
+    """Full server-visible state, including hidden labels."""
 
-    task: Literal["spam_detection"] = Field(
+    task: Literal["spam_detection", "priority_triage", "phishing_risk"] = Field(
         default="spam_detection",
         description="Active task identifier",
     )
@@ -60,4 +83,12 @@ class EmailState(State):
     true_label: Optional[Literal["spam", "not_spam"]] = Field(
         default=None,
         description="Ground-truth label (never exposed via EmailObservation)",
+    )
+    true_priority: Optional[Literal["high", "normal", "low"]] = Field(
+        default=None,
+        description="Ground-truth priority label (hidden from observation)",
+    )
+    true_risk: Optional[Literal["high", "medium", "low"]] = Field(
+        default=None,
+        description="Ground-truth phishing risk label (hidden from observation)",
     )

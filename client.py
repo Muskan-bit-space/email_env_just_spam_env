@@ -66,6 +66,8 @@ class MyEnv(
         """
         obs_data = payload.get("observation", {})
         observation = EmailObservation(
+            task=obs_data.get("task", "spam_detection"),
+            instructions=obs_data.get("instructions", ""),
             email_id=obs_data.get("email_id", ""),
             subject=obs_data.get("subject", ""),
             body=obs_data.get("body", ""),
@@ -103,4 +105,6 @@ class MyEnv(
             has_link=payload.get("has_link"),
             sender_reputation=payload.get("sender_reputation"),
             true_label=payload.get("true_label"),
+            true_priority=payload.get("true_priority"),
+            true_risk=payload.get("true_risk"),
         )

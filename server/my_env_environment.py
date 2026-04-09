@@ -4,12 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Email triage environment — Task 1: spam_detection (OpenEnv-compatible)."""
+"""Email triage environment with 3 graded tasks (OpenEnv-compatible)."""
 
 from __future__ import annotations
 
 import random
-from typing import Any, List, Literal, Optional, TypedDict
+from typing import Any, Dict, List, Literal, Optional, TypedDict
 from uuid import uuid4
 
 from openenv.core.env_server.interfaces import Environment
@@ -307,11 +307,72 @@ def _build_spam_dataset() -> List[_EmailRecord]:
     return rows
 
 
+TaskName = Literal["spam_detection", "priority_triage", "phishing_risk"]
+PriorityLabel = Literal["high", "normal", "low"]
+RiskLabel = Literal["high", "medium", "low"]
+
+
+def _priority_from_email(record: _EmailRecord) -> PriorityLabel:
+    """Deterministic priority label for task 2."""
+    subject = record["subject"].lower()
+    sender_rep = record["sender_reputation"]
+    spam_label = record["label"]
+
+    urgent_tokens = ("urgent", "password", "invoice", "account", "suspended")
+    if any(tok in subject for tok in urgent_tokens):
+        return "high"
+    if sender_rep == "low" and spam_label == "spam":
+        return "high"
+    if sender_rep == "high" and spam_label == "not_spam":
+        return "normal"
+    return "low"
+
+
+def _risk_from_email(record: _EmailRecord) -> RiskLabel:
+    """Deterministic phishing-risk label for task 3."""
+    subject = record["subject"].lower()
+    body = record["body"].lower()
+    sender = record["sender"].lower()
+
+    high_risk_markers = ("suspended", "verify", "password", "wire", "bank")
+    medium_risk_markers = ("offer", "proposal", "crypto", "exclusive", "invoice")
+
+    if record["sender_reputation"] == "low" and record["has_link"]:
+        return "high"
+    if any(marker in subject or marker in body for marker in high_risk_markers):
+        return "high"
+    if any(marker in subject or marker in body for marker in medium_risk_markers):
+        return "medium"
+    if "acmecorp.com" in sender or sender.endswith(".edu"):
+        return "low"
+    return "medium"
+
+
 def action_to_predicted_label(action: EmailAction) -> Literal["spam", "not_spam"]:
     """Map environment action to a gold label space."""
     if action.action == "mark_spam":
         return "spam"
     return "not_spam"
+
+
+def action_to_priority_label(action: EmailAction) -> PriorityLabel:
+    """Map task action to a priority label."""
+    mapping: Dict[str, PriorityLabel] = {
+        "mark_high_priority": "high",
+        "mark_normal_priority": "normal",
+        "mark_low_priority": "low",
+    }
+    return mapping.get(action.action, "low")
+
+
+def action_to_risk_label(action: EmailAction) -> RiskLabel:
+    """Map task action to phishing-risk label."""
+    mapping: Dict[str, RiskLabel] = {
+        "mark_high_risk": "high",
+        "mark_medium_risk": "medium",
+        "mark_low_risk": "low",
+    }
+    return mapping.get(action.action, "low")
 
 
 def grade_spam_detection(
@@ -326,8 +387,22 @@ def grade_spam_detection(
     return EmailReward(value=score)
 
 
+def grade_priority_triage(action: EmailAction, true_priority: PriorityLabel) -> EmailReward:
+    """Deterministic grader for task 2: 1.0 on exact match else 0.0."""
+    predicted = action_to_priority_label(action)
+    score = 1.0 if predicted == true_priority else 0.0
+    return EmailReward(value=score)
+
+
+def grade_phishing_risk(action: EmailAction, true_risk: RiskLabel) -> EmailReward:
+    """Deterministic grader for task 3: 1.0 on exact match else 0.0."""
+    predicted = action_to_risk_label(action)
+    score = 1.0 if predicted == true_risk else 0.0
+    return EmailReward(value=score)
+
+
 class EmailEnv(Environment[EmailAction, EmailObservation, EmailState]):
-    """Single-step spam classification episode."""
+    """Single-step multi-task email triage environment."""
 
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
 
@@ -338,6 +413,9 @@ class EmailEnv(Environment[EmailAction, EmailObservation, EmailState]):
         self._episode_id: Optional[str] = None
         self._step_count: int = 0
         self._current: Optional[_EmailRecord] = None
+        self._task: TaskName = "spam_detection"
+        self._true_priority: Optional[PriorityLabel] = None
+        self._true_risk: Optional[RiskLabel] = None
 
     def reset(
         self,
@@ -348,11 +426,35 @@ class EmailEnv(Environment[EmailAction, EmailObservation, EmailState]):
         self._reset_rubric()
         if seed is not None:
             self._rng = random.Random(seed)
+        task = kwargs.get("task", "spam_detection")
+        if task not in {"spam_detection", "priority_triage", "phishing_risk"}:
+            task = "spam_detection"
+        self._task = task
         self._episode_id = episode_id or str(uuid4())
         self._step_count = 0
         self._current = self._rng.choice(self._dataset)
+        self._true_priority = _priority_from_email(self._current)
+        self._true_risk = _risk_from_email(self._current)
         rec = self._current
+
+        instruction_map: Dict[TaskName, str] = {
+            "spam_detection": (
+                "Classify this email as spam or not spam. "
+                "Valid actions: mark_spam, mark_not_spam."
+            ),
+            "priority_triage": (
+                "Classify this email priority. "
+                "Valid actions: mark_high_priority, mark_normal_priority, mark_low_priority."
+            ),
+            "phishing_risk": (
+                "Classify phishing risk. "
+                "Valid actions: mark_high_risk, mark_medium_risk, mark_low_risk."
+            ),
+        }
+
         return EmailObservation(
+            task=self._task,
+            instructions=instruction_map[self._task],
             email_id=rec["id"],
             subject=rec["subject"],
             body=rec["body"],
@@ -372,12 +474,26 @@ class EmailEnv(Environment[EmailAction, EmailObservation, EmailState]):
         if self._current is None:
             raise RuntimeError("step() called before reset()")
 
-        true_label = self._current["label"]
-        predicted = action_to_predicted_label(action)
-        reward = 1.0 if predicted == true_label else -0.5
+        reward: float
+        if self._task == "spam_detection":
+            true_label = self._current["label"]
+            predicted = action_to_predicted_label(action)
+            reward = 1.0 if predicted == true_label else -0.5
+        elif self._task == "priority_triage":
+            if self._true_priority is None:
+                raise RuntimeError("priority label missing")
+            predicted_priority = action_to_priority_label(action)
+            reward = 1.0 if predicted_priority == self._true_priority else -0.25
+        else:
+            if self._true_risk is None:
+                raise RuntimeError("risk label missing")
+            predicted_risk = action_to_risk_label(action)
+            reward = 1.0 if predicted_risk == self._true_risk else -0.25
         self._step_count += 1
 
         return EmailObservation(
+            task=self._task,
+            instructions="Episode finished. Call reset() for the next email.",
             email_id="",
             subject="",
             body="",
@@ -399,7 +515,7 @@ class EmailEnv(Environment[EmailAction, EmailObservation, EmailState]):
         return EmailState(
             episode_id=self._episode_id,
             step_count=self._step_count,
-            task="spam_detection",
+            task=self._task,
             email_id=rec["id"],
             subject=rec["subject"],
             body=rec["body"],
@@ -407,4 +523,6 @@ class EmailEnv(Environment[EmailAction, EmailObservation, EmailState]):
             has_link=rec["has_link"],
             sender_reputation=rec["sender_reputation"],
             true_label=rec["label"],
+            true_priority=self._true_priority,
+            true_risk=self._true_risk,
         )
